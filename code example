@@ -1,0 +1,221 @@
+# from datetime import datetime
+import datetime as dt
+import backtrader as bt
+import math
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+# import talib
+
+def stock_atr(number, period_time, start_date, end_date, atr_percent):# 10-01 ~ 11-02
+    url= 'https://www.taifex.com.tw/cht/9/futuresQADetail'
+    headers= {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    response = requests.get(url, headers= headers)
+    soup = BeautifulSoup(response.text, 'html.parser')   
+    code= soup.find_all('td')#, align_= 'right')
+    stock_code= []
+    count= 0
+    for a in code:
+        res= a.text.strip()
+        if len(res)== 4 and res.isdigit():
+            if count== 0 :
+                stock_code.append(res)
+                count+= 2
+            elif count %2 ==0:
+                stock_code.append(res)
+            count+= 1
+### 公司的股票代碼 ###
+    num= stock_code[0:number]
+    ## 用20天的資料計算ATR指標
+    period= period_time-1
+    stock_dic= {}
+    for code in num:
+        name= code+ '.TW'
+        ## 獲取股票資料
+        price= yf.download(name, start= start_date, end= end_date)
+
+        ## 計算前20天股票資料的 ATR指標， 並取第21天的收盤價做比較
+        long_price= price.iloc[ :period_time, :]
+        last_day= price.iloc[ period_time, 3]
+        atr= talib.ATR(long_price['High'], long_price['Low'], long_price['Close'], timeperiod= period)
+        stock_dic[code]= round(atr[period], 2), round(atr[period]/last_day, 4)
+    stock_dic#, list(stock_dic.items())
+    stock= pd.DataFrame(stock_dic).T
+    stock.columns= ['ATR', 'Ratio']
+    atr_per= stock[stock['Ratio']> atr_percent].index.values
+
+    return atr_per
+# pd.DataFrame(list(stock_dic.items()))#, columns= ['Stock', 'ATR'])
+stock_list= stock_atr(250, 20, '2023-10-01', '2023-11-02', 0.05)
+
+class AllSizer(bt.Sizer):
+    params= (
+        ('percent', 30),
+    )
+    def _getsizing(self, comminfo, cash, data, isbuy):
+        position = self.broker.getposition(data)
+        if not position:
+            size= cash/data.close[0]* (self.p.percent/100)
+            # print(cash, comminfo, data.close[0], isbuy, data.datetime.date(0))
+            # print(position.size)
+            if size< 1:
+                size= 0
+            # else:
+            #     math.floor(cash/data.open* (self.params.percent/100))
+        else:
+            size= position.size
+            # print(f'已購買的股數: {position.size}')
+
+        size= int(size)
+        return size
+  
+class SmaCross(bt.SignalStrategy):
+    params= (
+        ('ma_period', 15),
+    )
+    def __init__(self): 
+        self.dataclose= self.data.close
+        self.order= None
+        # 增加移動均線的指標
+        self.ma= bt.indicators.SimpleMovingAverage(self.datas[0], period= self.params.ma_period)
+        # self.setsizer(PercentBoardSizer())
+        self.setsizer(AllSizer())
+    def log(self, txt):
+        dt= self.datas[0].datetime.date(0)
+
+    def next(self):
+        self.log('close{}'.format(self.dataclose[0]))
+        if self.order:
+            return
+        
+        if not self.position:  ### 是否持有資產，假設沒有則買入
+            if self.dataclose[0]> self.ma[0]:
+                if self.dataclose[-1]< self.dataclose[-2]:
+                    self.log('Buy Create{}'.format(self.dataclose[0]))
+                    self.buy()
+                    self.order= self.buy()#size=self.calculate_buy_size)
+        else:
+            if self.dataclose[0] < self.ma[0]:
+                self.log('Sell Create{}'.format(self.dataclose[0]))
+                self.order= self.sell()#size= self.calculate_buy_size())
+  
+### 定義指標Indicator 物件 ###
+class DCH(bt.Indicator):
+    # 這個物件的別名，所以後面我們可以用DCH/DonchianChannel來呼叫這個指標
+    # alias = ('DCH', 'DonchianChannel',)
+    
+    # 三條線分別代表唐奇安通道中的 中軌(上軌加下軌再除以2)、上軌、下軌
+    lines = ('dcm', 'dch', 'dcl',)  # dc middle, dc high, dc low
+    
+    # 軌道的計算方式：用過去20天的資料來計算，所以period是20，lookback的意思是要不要將今天的資料納入計算，由於唐奇安通道是取過去20天的最高或最低，所以一定不能涵蓋今天，不然永遠不會有訊號出現，所以要填-1(從前一天開始算20天)
+    params = (
+        ('buy_period',20),
+        ('sell_period', 20),
+        ('lookback', -1),  # consider current bar or not
+    )
+    
+    # 是否要將Indicators另外畫一張圖，然而通道線通常都是跟股價圖畫在同一張，才能看得出相對關係，所以這裡就填subplot=False
+    plotinfo = dict(subplot=False)  # plot along with data
+    
+    # 繪圖設定，ls是line style，'--'代表虛線
+    plotlines = dict(
+        dcm=dict(ls='--'),  # dashed line
+        dch=dict(_samecolor=True),  # use same color as prev line (dcm)
+        dcl=dict(_samecolor=True),  # use same color as prev line (dch)
+    )
+    
+    def __init__(self):
+        # hi與lo是指每日股價的最高與最低價格
+        hi, lo = self.data.high(-1), self.data.low(-1)
+        
+        # 視需求決定是否要從前一天開始讀資料，上面已經定義lookback存在，所以這邊會直接從前一天的資料開始跑
+        # if self.p.lookback:  # move backwards as needed
+        #     hi, lo = hi(self.p.lookback), lo(self.p.lookback)
+        # 定義三條線的計算方式
+        self.l.dch = bt.ind.Highest(hi, period=self.p.buy_period)
+        self.l.dcl = bt.ind.Lowest(lo, period=self.p.sell_period)
+        self.l.dcm = (self.l.dch + self.l.dcl) / 2.0  # avg of the above
+
+class Test(bt.Strategy):
+    params= (
+        ('buy_period', 4), 
+        ('sell_period', 10),
+    )
+
+    def __init__(self):
+        self.dataclose= self.data.close
+        self.myind= DCH(buy_period= self.p.buy_period, sell_period= self.p.sell_period)
+        self.setsizer(AllSizer())
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            return
+        
+        if order.status in [order.Completed]:     ### 假設訂單完成，紀錄交易是買入還是賣出
+            if order.isbuy():
+                self.log('Buy Executed {}'.format(order.executed.price))
+            elif order.issell():
+                self.log('Sell Executed {}'.format(order.executed.price))
+            
+            self.bar_executed= len(self)  ### 儲存交易的日期
+            
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log('Order canceled/Margin/Rejected')
+        
+        self.order= None
+
+    def next(self):
+      self.log('close{}'.format(self.dataclose[0]))
+      print("Data Length:", len(self.dataclose))
+
+      if self.order:
+          return
+      if not self.position:
+          if self.dataclose[0]> self.myind.dch[0]:
+              self.log('Buy Create{}'.format(self.dataclose[0]))
+              self.buy()
+              self.order= self.buy()
+      else:
+          if self.dataclose[0]< self.myind.dcl[0]:
+              self.log('Sell Create{}'.format(self.dataclose[0]))
+              self.sell()
+              self.order= self.sell()
+
+        # print(f"Current Stock: {self.broker.getposition(self.data).size}")
+        # account_value = self.broker.get_value()
+        # stock_value = account_value - self.broker.get_cash()  # 計算股票價值
+        # print(f"Account Value: {account_value}, Stock Value: {stock_value}")
+
+    # def stop(self):
+    #     print('buy_period: {}, sell_period: {}, 資金: {}'.format(self.p.buy_period, self.p.sell_period, 
+    #     round(self.broker.getvalue(),2)))
+    def log(self, txt):
+        dt= self.datas[0].datetime.date(0)
+
+if __name__ == '__main__':
+    stock_list= ['2382', '6669', '3231', '3661', '3443', '2376', '3017', '5269',
+       '3035', '2388', '4763', '1519', '9958', '2363', '6139', '8210',
+       '3715', '3006', '2421']
+    result= {}
+    for stock_code in stock_list:
+        cerebro = bt.Cerebro()
+        cerebro.broker.setcash(100000)
+        data_path= yf.download(stock_code+ '.TW', start= '2023-10-01',end= '2023-12-02')
+        stock_data= bt.feeds.PandasData(dataname= data_path, fromdate= dt.datetime(2022,12,1), todate= dt.datetime(2023,12,1)) 
+
+        cerebro.adddata(stock_data)
+        cerebro.addstrategy(Test)
+        # cerebro.optstrategy(Test, buy_period= range(2, 24, 4), sell_period= range(2, 24, 4))
+        cerebro.run()
+        print(cerebro.broker.getvalue())
+        result[stock_code]= cerebro.broker.getvalue()
+    result= pd.DataFrame(list(result.items()), columns= ['Stock', 'Profit'])
+    total_company= len(stock_list)
+    total_cost= total_company* 100000
+    total_profit=  round(result['Profit'].sum()- total_cost, 2)
+    roi= round(total_profit/ total_cost, 4)
+    print('公司數量: {} , 總盈利: {} , 報酬率: {}'.format(total_company, total_profit, roi))
+        # cerebro.plot()
+    
+Result: 公司數量: 19 , 總盈利: 47036.4 , 報酬率: 0.0248
+
