@@ -200,7 +200,7 @@ if __name__ == '__main__':
     for stock_code in stock_list:
         cerebro = bt.Cerebro()
         cerebro.broker.setcash(100000)
-        data_path= yf.download(stock_code+ '.TW', start= '2023-10-01',end= '2023-12-02')
+        data_path= yf.download(stock_code+ '.TW', start= '2023-10-0',end= '2023-12-02')
         stock_data= bt.feeds.PandasData(dataname= data_path, fromdate= dt.datetime(2022,12,1), todate= dt.datetime(2023,12,1)) 
 
         cerebro.adddata(stock_data)
@@ -217,5 +217,5 @@ if __name__ == '__main__':
     print('公司數量: {} , 總盈利: {} , 報酬率: {}'.format(total_company, total_profit, roi))
         # cerebro.plot()
     
-Result: 公司數量: 19 , 總盈利: 47036.4 , 報酬率: 0.0248
+Result: 公司數量: 19 , 總盈利: 47036.4 , 報酬率: 0.01
 
